@@ -491,6 +491,91 @@ def test_strategies_payload_direct():
     assert set(body["strategies"]) == {"ma_crossover", "rsi_reversion", "breakout"}
 
 
+# --------------------------------------------------------------------------- #
+# PORT handling (process hosts inject it)
+# --------------------------------------------------------------------------- #
+
+
+def test_default_port_reads_the_environment(monkeypatch):
+    """Railway/Render/Heroku/Fly all inject $PORT - it must win over 8000."""
+    monkeypatch.setenv("PORT", "9773")
+    assert web._default_port() == 9773
+
+
+def test_default_port_ignores_a_missing_or_blank_port(monkeypatch):
+    monkeypatch.delenv("PORT", raising=False)
+    assert web._default_port() == 8000
+    monkeypatch.setenv("PORT", "   ")
+    assert web._default_port() == 8000
+
+
+@pytest.mark.parametrize("bad", ["not-a-port", "0", "-1", "70000", "8o00"])
+def test_default_port_falls_back_on_garbage(monkeypatch, bad):
+    monkeypatch.setenv("PORT", bad)
+    assert web._default_port() == 8000
+
+
+def test_explicit_port_beats_the_environment(monkeypatch):
+    """An explicit --port is the strongest signal of the three."""
+    monkeypatch.setenv("PORT", "9773")
+    started = {}
+
+    class FakeServer:
+        def __init__(self, host, port):
+            started["port"] = port
+            self.server_address = (host, port)
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(web, "serve", lambda host, port: FakeServer(host, port))
+    assert web.main(["--host", "127.0.0.1", "--port", "9774"]) == 0
+    assert started["port"] == 9774
+
+
+def test_environment_port_is_used_when_no_flag_is_given(monkeypatch):
+    monkeypatch.setenv("PORT", "9775")
+    started = {}
+
+    class FakeServer:
+        def __init__(self, host, port):
+            started["port"] = port
+            self.server_address = (host, port)
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(web, "serve", lambda host, port: FakeServer(host, port))
+    assert web.main(["--host", "127.0.0.1"]) == 0
+    assert started["port"] == 9775
+
+
+def test_host_falls_back_to_the_environment(monkeypatch):
+    monkeypatch.setenv("HOST", "127.0.0.1")
+    started = {}
+
+    class FakeServer:
+        def __init__(self, host, port):
+            started["host"] = host
+            self.server_address = (host, port)
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(web, "serve", lambda host, port: FakeServer(host, port))
+    assert web.main([]) == 0
+    assert started["host"] == "127.0.0.1"
+
+
 def test_main_starts_and_stops(monkeypatch):
     started = {}
     stopped = []

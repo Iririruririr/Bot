@@ -426,7 +426,10 @@ def cmd_web(args) -> int:
     """Serve the dashboard (blocking; Ctrl+C to stop)."""
     from bot.web.server import main as web_main
 
-    return web_main(["--host", args.host, "--port", str(args.port)])
+    argv = ["--host", args.host]
+    if args.port is not None:
+        argv += ["--port", str(args.port)]
+    return web_main(argv)
 
 
 # --------------------------------------------------------------------------- #
@@ -587,7 +590,10 @@ def build_parser() -> argparse.ArgumentParser:
     web = sub.add_parser("web", help="serve the web dashboard")
     web.add_argument("--host", default="0.0.0.0",
                      help="interface to bind (0.0.0.0 = every interface)")
-    web.add_argument("--port", type=int, default=8000)
+    # no default: leaving it None lets the server fall back to $PORT, which is
+    # what Railway/Render/Heroku/Fly inject.  A hard default here would mask it.
+    web.add_argument("--port", type=int, default=None,
+                     help="port to bind (defaults to $PORT, else 8000)")
     web.set_defaults(func=cmd_web)
 
     return parser

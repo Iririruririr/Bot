@@ -18,6 +18,7 @@ ability to pause, scrub and change speed - lives on the client where it belongs.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -353,17 +354,37 @@ def serve(host: str = "0.0.0.0", port: int = 8000) -> ThreadingHTTPServer:
     return ThreadingHTTPServer((host, port), DashboardHandler)
 
 
+def _default_port() -> int:
+    """Process hosts (Railway, Render, Heroku, Fly) inject the port.
+
+    ``PORT`` wins over the built-in default, but an explicit ``--port`` still
+    wins over both - see :func:`main`.
+    """
+    raw = os.environ.get("PORT", "").strip()
+    if not raw:
+        return 8000
+    try:
+        port = int(raw)
+    except ValueError:
+        return 8000
+    return port if 0 < port < 65536 else 8000
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description="FX bot web dashboard")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", default=os.environ.get("HOST") or "0.0.0.0")
+    parser.add_argument("--port", type=int, default=None,
+                        help="defaults to $PORT, else 8000")
     args = parser.parse_args(argv)
 
-    httpd = serve(args.host, args.port)
-    host, port = httpd.server_address[:2]
-    print(f"Bot dashboard running on http://{host}:{port}")
+    host = args.host
+    port = args.port if args.port is not None else _default_port()
+
+    httpd = serve(host, port)
+    bound_host, bound_port = httpd.server_address[:2]
+    print(f"Bot dashboard running on http://{bound_host}:{bound_port}")
     print("Press Ctrl+C to stop.")
     try:
         httpd.serve_forever()

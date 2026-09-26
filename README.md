@@ -160,9 +160,34 @@ Two things to know:
   plays it back, so pausing, scrubbing and changing speed all work on Vercel.
   The live pacing is not a background process, because Vercel has none.
 * **`maxDuration` is 300s** in `vercel.json`, which is Vercel's Hobby ceiling.
-  The dashboard caps runs at 2500 bars for the same reason. If you need longer
-  runs, deploy to a process host instead (Railway, Render, Fly.io) where
-  `python -m bot web` runs unchanged and the cap can be lifted.
+  The dashboard caps runs at 2500 bars for the same reason.
+
+### Or: deploy it as a plain process (no rewrite needed)
+
+Because the dashboard is also just a normal long-running server, it deploys to
+any process host with **zero code changes** — the Vercel rewrite is additive,
+not a prerequisite:
+
+```bash
+python -m bot web --host 0.0.0.0 --port $PORT
+```
+
+`PORT` and `HOST` are read from the environment (an explicit `--port` still
+wins), which is the convention on Railway, Render, Heroku, Fly.io and most
+PaaS. There is a `Dockerfile` if you want a container instead — it is untested,
+so the start command above is the safer bet.
+
+| | Vercel (serverless) | Process host |
+| --- | --- | --- |
+| Code changes | `vercel.json` + `api/index.py` | none |
+| Run length | capped at 2500 bars / 300s | uncapped |
+| Cold starts | yes, on the first request | no |
+| Cost at zero traffic | free | free tier on most, or a small VPS |
+| Best for | a public link, occasional use | anything you check regularly |
+
+For a dashboard you actually sit and watch, the process host is the better fit:
+no cold start between clicks, and no bar cap. Vercel is the better fit if you
+just want to hand someone a URL.
 
 ## Live trading (OANDA)
 
