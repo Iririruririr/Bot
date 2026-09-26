@@ -120,8 +120,8 @@ From the sidebar you can:
 * **Watch a live paper session** — the same engine replays a simulated feed
   bar-by-bar, so the scaling bot's adds, breakeven moves, trailing stops and
   scale-out tranches appear as they happen. Positions, tranche count, open P&L
-  and the live equity curve update every bar, and you can stop the session at
-  any point.
+  and the equity curve update every bar. You can pause, scrub to any bar, or
+  change the playback speed (1×–8×) — <kbd>Space</kbd> toggles play/pause.
 
 Everything is synthetic EUR/USD data, so the mechanics are real but the returns
 are not a forecast.
@@ -133,14 +133,36 @@ The JSON API behind it:
 | `GET` | `/api/health` | liveness + version |
 | `GET` | `/api/strategies` | registered strategies and their defaults |
 | `GET` | `/api/config` | current default configuration |
-| `POST` | `/api/run` | start a backtest → `{job_id}` |
-| `POST` | `/api/paper` | start a live replay → `{job_id}` |
-| `GET` | `/api/jobs` | every job |
-| `GET` | `/api/jobs/{id}` | job state, progress and latest result |
-| `POST` | `/api/jobs/{id}/stop` | request an early stop |
+| `POST` | `/api/run` | run a backtest → the full report |
+| `POST` | `/api/replay` | run a paper session → a bar-by-bar trace |
 
-Jobs run on their own threads, so a long replay never blocks the UI; the page
-polls its job and re-renders as the result grows.
+Every request is **stateless**: the server runs its work to completion and
+returns the whole answer in one response, so nothing has to survive between
+requests. That is what makes the same code deployable to a serverless platform
+as well as to a plain process.
+
+### Deploying to Vercel
+
+`vercel.json` and `api/index.py` are already in the repo, so this is a
+straight `vercel --prod` from the project root. The static assets are served
+from Vercel's CDN via `outputDirectory`, and `/api/*` is rewritten to a single
+Python function that reuses `bot.web.server` unchanged.
+
+```bash
+npm i -g vercel
+vercel --prod
+```
+
+Two things to know:
+
+* **The replay is client-side playback.** `POST /api/replay` computes the whole
+  bar-by-bar trace in one response (a 2500-bar run takes ~1s) and the browser
+  plays it back, so pausing, scrubbing and changing speed all work on Vercel.
+  The live pacing is not a background process, because Vercel has none.
+* **`maxDuration` is 300s** in `vercel.json`, which is Vercel's Hobby ceiling.
+  The dashboard caps runs at 2500 bars for the same reason. If you need longer
+  runs, deploy to a process host instead (Railway, Render, Fly.io) where
+  `python -m bot web` runs unchanged and the cap can be lifted.
 
 ## Live trading (OANDA)
 

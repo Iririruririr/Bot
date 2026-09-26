@@ -1,21 +1,31 @@
-"""Tests for the web dashboard: job manager, JSON API, and the HTTP layer.
+"""Tests for the web dashboard: the stateless JSON API and the HTTP layer.
 
 Every test spins up a real :class:`ThreadingHTTPServer` on an ephemeral port and
 talks to it with ``urllib``, so these are end-to-end tests rather than unit tests
 of helper functions.
+
+The API is deliberately **stateless**: each request runs its work to completion
+and returns the whole answer in one response.  That is what lets the same code
+run on a platform that invokes a function per request, and it is what these
+tests pin down.
 """
 from __future__ import annotations
 
 import json
 import threading
-import time
 import urllib.error
 import urllib.request
 
 import pytest
 
 from bot.web import server as web
-from bot.web.server import Job, JobManager, run_backtest_job, run_paper_job
+from bot.web.server import (
+    MAX_REPLAY_BARS,
+    _pick,
+    run_backtest,
+    run_replay,
+    strategies_payload,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -37,11 +47,11 @@ class LiveServer:
         return f"http://127.0.0.1:{self.port}"
 
     def get(self, path):
-        with urllib.request.urlopen(self.base + path, timeout=30) as response:
+        with urllib.request.urlopen(self.base + path, timeout=120) as response:
             return response.status, json.loads(response.read().decode())
 
     def get_raw(self, path):
-        with urllib.request.urlopen(self.base + path, timeout=30) as response:
+        with urllib.request.urlopen(self.base + path, timeout=120) as response:
             return response.status, response.headers, response.read()
 
     def post(self, path, body):
@@ -51,7 +61,7 @@ class LiveServer:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(request, timeout=300) as response:
             return response.status, json.loads(response.read().decode())
 
     def close(self):
@@ -66,9 +76,9 @@ def server():
     live.close()
 
 
-def backtest_payload(**overrides):
-    """A small but realistic backtest request."""
-    payload = {
+def payload(**overrides):
+    """A small but realistic dashboard request."""
+    body = {
         "strategy": "ma_crossover",
         "bars": 300,
         "seed": 7,
@@ -97,75 +107,26 @@ def backtest_payload(**overrides):
             "lot_size": 1000.0,
         },
     }
-    payload.update(overrides)
-    return payload
+    body.update(overrides)
+    return body
 
 
-def wait_for(job_id, server, statuses=("done",), timeout=60.0):
-    deadline = time.time() + timeout
-    job = None
-    while time.time() < deadline:
-        _, job = server.get(f"/api/jobs/{job_id}")
-        if job["status"] in statuses:
-            return job
-        time.sleep(0.1)
-    raise AssertionError(f"job {job_id} never left {job['status'] if job else 'unknown'}")
+SCALING_OFF = {"mode": "off", "tranches": 1, "scale_out": []}
 
 
 # --------------------------------------------------------------------------- #
-# JobManager
+# _pick
 # --------------------------------------------------------------------------- #
 
 
-def test_job_manager_runs_a_job_and_marks_it_done():
-    manager = JobManager()
-    job_id = manager.submit("backtest", lambda job: job.__setattr__("progress", 1.0))
+def test_pick_drops_unknown_keys_and_keeps_known_ones():
+    from bot.core.risk import RiskConfig
 
-    deadline = time.time() + 10
-    while time.time() < deadline and manager.get(job_id).status == "running":
-        time.sleep(0.02)
-
-    job = manager.get(job_id)
-    assert job.status == "done"
-    assert job.progress == 1.0
-    assert job.error is None
-    assert job.id in [j.id for j in manager.all()]
-
-
-def test_job_manager_captures_exceptions_as_errors():
-    def boom(job):
-        raise RuntimeError("kaboom")
-
-    manager = JobManager()
-    job_id = manager.submit("backtest", boom)
-
-    deadline = time.time() + 10
-    while time.time() < deadline and manager.get(job_id).status == "running":
-        time.sleep(0.02)
-
-    job = manager.get(job_id)
-    assert job.status == "error"
-    assert "kaboom" in job.error
-    assert "RuntimeError" in job.error
-
-
-def test_job_manager_stop_is_idempotent_and_ignores_unknown_ids():
-    manager = JobManager()
-    job_id = manager.submit("backtest", lambda job: time.sleep(0.05))
-    assert manager.stop(job_id) is True
-    assert manager.get(job_id).stop_requested is True
-    assert manager.stop("nope") is False
-
-
-def test_job_snapshot_round_trips_over_json():
-    job = Job(id="abc123", kind="paper")
-    job.progress = 0.5
-    snapshot = json.loads(json.dumps(job.snapshot()))
-    assert snapshot["id"] == "abc123"
-    assert snapshot["kind"] == "paper"
-    assert snapshot["status"] == "running"
-    assert snapshot["progress"] == 0.5
-    assert snapshot["result"] is None
+    assert _pick({"risk_per_trade_pct": 2.0, "nonsense": 1}, RiskConfig) == {
+        "risk_per_trade_pct": 2.0
+    }
+    assert _pick({}, RiskConfig) == {}
+    assert _pick(None, RiskConfig) == {}
 
 
 # --------------------------------------------------------------------------- #
@@ -178,7 +139,6 @@ def test_index_is_served_as_html(server):
     assert status == 200
     assert headers["Content-Type"].startswith("text/html")
     assert b"FX Bot" in body
-    # the page must reference the assets it needs
     assert b"/style.css" in body
     assert b"/app.js" in body
 
@@ -191,47 +151,48 @@ def test_assets_are_served(server):
         assert body.strip(), f"{path} is empty"
 
 
-def test_app_js_uses_relative_urls(server):
-    """The dashboard is proxied under a preview host, so no absolute origins."""
-    _, _, body = server.get_raw("/app.js")
-    text = body.decode()
-    assert "fetch(\"/api/" in text
+def test_app_js_uses_relative_urls_and_polls_nothing(server):
+    """The dashboard is proxied under a preview host and must stay stateless."""
+    text = server.get_raw("/app.js")[2].decode()
+    assert 'fetch("/api/' in text
     assert "http://localhost" not in text
     assert "127.0.0.1" not in text
+    # no polling, no job ids, no /api/jobs
+    assert "setInterval" not in text
+    assert "/api/jobs" not in text
 
 
 def test_health(server):
-    status, payload = server.get("/api/health")
+    status, body = server.get("/api/health")
     assert status == 200
-    assert payload["ok"] is True
-    assert payload["version"]
+    assert body["ok"] is True
+    assert body["version"]
+    assert body["stateless"] is True
 
 
 def test_strategies_lists_every_registered_strategy(server):
-    _, payload = server.get("/api/strategies")
-    names = set(payload["strategies"])
-    assert names == {"ma_crossover", "rsi_reversion", "breakout"}
-    for name, info in payload["strategies"].items():
+    _, body = server.get("/api/strategies")
+    assert set(body["strategies"]) == {"ma_crossover", "rsi_reversion", "breakout"}
+    for name, info in body["strategies"].items():
         assert info["name"] == name
         assert info["warmup"] > 0
         assert isinstance(info["params"], dict)
 
 
 def test_config_payload_matches_bot_config(server):
-    _, payload = server.get("/api/config")
-    assert payload["broker"]["starting_cash"] > 0
-    assert payload["risk"]["risk_per_trade_pct"] > 0
-    assert payload["engine"]["record_equity"] is True
-    assert set(payload["scaling"]) >= {"mode", "tranches", "add_step_r"}
-    assert set(payload["strategies"]) == {"ma_crossover", "rsi_reversion", "breakout"}
+    _, body = server.get("/api/config")
+    assert body["broker"]["starting_cash"] > 0
+    assert body["risk"]["risk_per_trade_pct"] > 0
+    assert body["engine"]["record_equity"] is True
+    assert set(body["scaling"]) >= {"mode", "tranches", "add_step_r"}
+    assert set(body["strategies"]) == {"ma_crossover", "rsi_reversion", "breakout"}
 
 
 def test_unknown_get_route_is_a_json_404(server):
     with pytest.raises(urllib.error.HTTPError) as excinfo:
         server.get("/api/nope")
     assert excinfo.value.code == 404
-    body = json.loads(excinfo.value.read().decode())
-    assert "error" in body
+    assert "error" in json.loads(excinfo.value.read().decode())
 
 
 def test_unknown_post_route_is_a_json_404(server):
@@ -240,16 +201,16 @@ def test_unknown_post_route_is_a_json_404(server):
     assert excinfo.value.code == 404
 
 
-def test_unknown_job_is_a_json_404(server):
-    with pytest.raises(urllib.error.HTTPError) as excinfo:
-        server.get("/api/jobs/does-not-exist")
-    assert excinfo.value.code == 404
-
-
-def test_stopping_an_unknown_job_is_a_json_404(server):
-    with pytest.raises(urllib.error.HTTPError) as excinfo:
-        server.post("/api/jobs/does-not-exist/stop", {})
-    assert excinfo.value.code == 404
+def test_job_endpoints_are_gone(server):
+    """The polling model was removed; those paths must 404, not silently work."""
+    for path in ("/api/jobs", "/api/jobs/abc123"):
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            server.get(path)
+        assert excinfo.value.code == 404, path
+    for path in ("/api/paper", "/api/jobs/abc123/stop"):
+        with pytest.raises(urllib.error.HTTPError) as excinfo:
+            server.post(path, {})
+        assert excinfo.value.code == 404, path
 
 
 # --------------------------------------------------------------------------- #
@@ -257,36 +218,31 @@ def test_stopping_an_unknown_job_is_a_json_404(server):
 # --------------------------------------------------------------------------- #
 
 
-def test_run_returns_a_job_id(server):
-    status, payload = server.post("/api/run", backtest_payload(bars=120))
-    assert status == 202
-    assert payload["job_id"]
-    job = wait_for(payload["job_id"], server)
-    assert job["status"] == "done"
+def test_run_returns_the_whole_report_in_one_response(server):
+    status, body = server.post("/api/run", payload(bars=250))
 
+    assert status == 200
+    # no job id - the answer is already complete
+    assert "job_id" not in body
+    assert body["meta"]["strategy"] == "ma_crossover"
+    assert body["meta"]["bars"] == 250
+    assert body["meta"]["scaling"]["mode"] == "pyramid"
 
-def test_run_produces_a_full_report(server):
-    _, started = server.post("/api/run", backtest_payload())
-    job = wait_for(started["job_id"], server)
-    result = job["result"]
-
-    assert result["meta"]["strategy"] == "ma_crossover"
-    assert result["meta"]["bars"] == 300
-    assert result["meta"]["scaling"]["mode"] == "pyramid"
-
-    stats = result["stats"]
+    stats = body["stats"]
     for key in (
-        "net_pnl", "total_return_pct", "final_equity", "max_drawdown_pct",
-        "sharpe", "sortino", "profit_factor", "trades", "wins", "losses",
-        "win_rate", "expectancy", "expectancy_r", "exposure_pct",
+        "starting_equity", "net_pnl", "total_return_pct", "final_equity",
+        "max_drawdown_pct", "max_drawdown_amount", "sharpe", "sortino",
+        "profit_factor", "trades", "wins", "losses", "win_rate",
+        "expectancy", "expectancy_r", "avg_win", "avg_loss",
+        "largest_win", "largest_loss", "total_commission", "exposure_pct",
     ):
         assert key in stats, key
-    assert stats["trades"] == len(result["trades"])
+    assert stats["trades"] == len(body["trades"])
     assert stats["wins"] + stats["losses"] <= stats["trades"]
-    # one equity point per bar
-    assert len(result["equity_curve"]) == 300
+    assert stats["starting_equity"] == 100_000.0
+    assert len(body["equity_curve"]) == 250      # one point per bar
 
-    trade = result["trades"][0]
+    trade = body["trades"][0]
     for key in ("symbol", "side", "qty", "entry_price", "exit_price",
                 "entry_time", "exit_time", "pnl", "commission", "net_pnl",
                 "exit_reason", "max_r"):
@@ -294,185 +250,183 @@ def test_run_produces_a_full_report(server):
     assert trade["side"] in ("BUY", "SELL")
 
 
-def test_run_scaling_bot_reports_its_activity(server):
-    _, started = server.post("/api/run", backtest_payload())
-    job = wait_for(started["job_id"], server)
-    scaling = job["result"]["scaling_stats"]
-
+def test_run_reports_scaling_activity(server):
+    _, body = server.post("/api/run", payload())
+    scaling = body["scaling_stats"]
     for key in ("adds", "scale_outs", "breakevens", "trail_updates", "skipped_adds"):
         assert key in scaling, key
     assert scaling["adds"] > 0
     assert scaling["scale_outs"] > 0
+    assert len(body["events"]) > 0
+    assert all("kind" in e for e in body["events"])
 
 
 def test_run_scaling_off_still_works(server):
-    """The trading bot on its own must be runnable from the dashboard."""
-    payload = backtest_payload()
-    payload["scaling"] = {"mode": "off", "tranches": 1, "scale_out": []}
-    _, started = server.post("/api/run", payload)
-    job = wait_for(started["job_id"], server)
-
-    result = job["result"]
-    assert result["meta"]["scaling"]["mode"] == "off"
-    assert result["scaling_stats"]["adds"] == 0
-    assert result["scaling_stats"]["scale_outs"] == 0
+    """The plain trading bot must be runnable from the dashboard."""
+    _, body = server.post("/api/run", payload(scaling=SCALING_OFF))
+    assert body["meta"]["scaling"]["mode"] == "off"
+    assert body["scaling_stats"]["adds"] == 0
+    assert body["scaling_stats"]["scale_outs"] == 0
 
 
 def test_run_is_deterministic_for_a_fixed_seed(server):
-    _, first = server.post("/api/run", backtest_payload(bars=200))
-    _, second = server.post("/api/run", backtest_payload(bars=200))
+    _, first = server.post("/api/run", payload(bars=200))
+    _, second = server.post("/api/run", payload(bars=200))
 
-    a = wait_for(first["job_id"], server)["result"]
-    b = wait_for(second["job_id"], server)["result"]
-
-    assert a["stats"]["net_pnl"] == b["stats"]["net_pnl"]
-    assert a["stats"]["trades"] == b["stats"]["trades"]
-    assert a["equity_curve"] == b["equity_curve"]
+    assert first["stats"]["net_pnl"] == second["stats"]["net_pnl"]
+    assert first["stats"]["trades"] == second["stats"]["trades"]
+    assert first["equity_curve"] == second["equity_curve"]
+    assert first["trades"] == second["trades"]
 
 
-def test_run_with_an_unknown_strategy_reports_an_error(server):
-    _, started = server.post("/api/run", backtest_payload(strategy="does_not_exist"))
-    job = wait_for(started["job_id"], server, statuses=("error",))
-    assert job["status"] == "error"
-    assert job["error"]
-    assert job["result"] is None
+def test_run_with_an_unknown_strategy_is_a_json_error(server):
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        server.post("/api/run", payload(strategy="does_not_exist"))
+    assert excinfo.value.code == 400
+    assert "error" in json.loads(excinfo.value.read().decode())
+
+
+def test_run_with_bad_scaling_config_is_a_json_error(server):
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        server.post("/api/run", payload(scaling={"mode": "sideways"}))
+    assert excinfo.value.code == 400
+    assert "error" in json.loads(excinfo.value.read().decode())
 
 
 def test_run_ignores_unknown_config_keys(server):
     """Extra keys from a future UI must not break the dataclass constructors."""
-    _, started = server.post(
+    _, body = server.post(
         "/api/run",
-        backtest_payload(bars=120, risk={"risk_per_trade_pct": 1.0, "bogus": 42},
-                         broker={"starting_cash": 50_000.0, "bogus": "x"}),
+        payload(bars=120, risk={"risk_per_trade_pct": 1.0, "bogus": 42},
+                broker={"starting_cash": 50_000.0, "bogus": "x"}),
     )
-    job = wait_for(started["job_id"], server)
-    assert job["status"] == "done"
-    assert job["result"]["stats"]["starting_equity"] == 50_000.0
+    assert body["stats"]["starting_equity"] == 50_000.0
 
 
-def test_jobs_endpoint_lists_every_job(server):
-    _, started = server.post("/api/run", backtest_payload(bars=120))
-    wait_for(started["job_id"], server)
-
-    status, jobs = server.get("/api/jobs")
-    assert status == 200
-    assert isinstance(jobs, list)
-    assert any(job["id"] == started["job_id"] for job in jobs)
+def test_run_caps_bars_at_the_replay_limit(server):
+    """A huge request must not be able to pin the process for ever."""
+    _, body = server.post("/api/run", payload(bars=10 * MAX_REPLAY_BARS))
+    assert body["meta"]["bars"] == MAX_REPLAY_BARS
 
 
 # --------------------------------------------------------------------------- #
-# POST /api/paper
+# POST /api/replay
 # --------------------------------------------------------------------------- #
 
 
-def test_paper_reports_incremental_progress(server):
-    _, started = server.post(
-        "/api/paper",
-        backtest_payload(bars=400, delay_ms=0, scaling={"mode": "pyramid", "tranches": 3}),
-    )
+def test_replay_returns_a_frame_per_bar(server):
+    _, body = server.post("/api/replay", payload(bars=250))
 
-    # poll until the job has moved past the warmup
-    seen_bar = 0
-    deadline = time.time() + 60
-    while time.time() < deadline:
-        _, job = server.get(f"/api/jobs/{started['job_id']}")
-        if job["result"]:
-            seen_bar = max(seen_bar, job["result"]["bar"])
-            if seen_bar > 60:
-                break
-        time.sleep(0.02)
-
-    _, job = server.get(f"/api/jobs/{started['job_id']}")
-    assert job["result"]["bar"] >= 60
-    assert job["result"]["bars"] == 400
-    assert 0.0 < job["progress"] < 1.0
-
-    final = wait_for(started["job_id"], server)
-    assert final["result"]["bar"] == 400
-    assert final["progress"] == 1.0
+    assert body["meta"]["bars"] == 250
+    assert len(body["frames"]) == 250
+    # frames are in bar order
+    assert [f["bar"] for f in body["frames"]] == list(range(250))
+    for frame in body["frames"]:
+        for key in ("bar", "bars", "equity", "cash", "unrealized",
+                    "positions", "trades_closed", "events_seen"):
+            assert key in frame, key
+        assert frame["equity"] > 0
 
 
-def test_paper_snapshot_shape(server):
-    _, started = server.post(
-        "/api/paper",
-        backtest_payload(bars=250, delay_ms=0, scaling={"mode": "pyramid", "tranches": 3}),
-    )
-    job = wait_for(started["job_id"], server)
-    snap = job["result"]
+def test_replay_frames_are_consistent(server):
+    """A frame is only useful if its trade/event counts slice the lists back."""
+    _, body = server.post("/api/replay", payload(bars=300))
+    frames = body["frames"]
 
-    for key in ("bar", "bars", "equity", "cash", "unrealized",
-                "positions", "equity_curve", "trades", "scaling_stats", "events"):
-        assert key in snap, key
-    assert isinstance(snap["positions"], list)
-    assert isinstance(snap["events"], list)
-    assert len(snap["equity_curve"]) >= 1
+    for frame in frames:
+        assert 0 <= frame["trades_closed"] <= len(body["trades"])
+        assert 0 <= frame["events_seen"] <= len(body["events"])
 
-    for point in snap["equity_curve"]:
-        assert set(point) == {"time", "equity"}
-        assert point["equity"] > 0
-
-    # every event is JSON-serialisable and carries a kind
-    for event in snap["events"]:
-        assert "kind" in event
-        json.dumps(event)
+    # monotonic, and the last frame has seen everything
+    counts = [f["trades_closed"] for f in frames]
+    assert counts == sorted(counts)
+    assert counts[-1] == len(body["trades"])
+    assert frames[-1]["events_seen"] == len(body["events"])
 
 
-def test_paper_exposes_live_position_state(server):
-    _, started = server.post(
-        "/api/paper",
-        backtest_payload(bars=400, delay_ms=0, scaling={"mode": "pyramid", "tranches": 3}),
-    )
+def test_replay_final_frame_matches_a_plain_backtest(server):
+    """The replay is the same engine - it must agree with a backtest."""
+    _, replay = server.post("/api/replay", payload(bars=300, scaling=SCALING_OFF))
+    _, back = server.post("/api/run", payload(bars=300, scaling=SCALING_OFF))
+
+    assert replay["frames"][-1]["equity"] == pytest.approx(
+        back["stats"]["final_equity"], rel=1e-9)
+    assert len(replay["trades"]) == back["stats"]["trades"]
+    assert replay["scaling_stats"]["adds"] == 0
+
+
+def test_replay_shows_scaling_activity(server):
+    _, body = server.post("/api/replay", payload(bars=400))
+    stats = body["scaling_stats"]
+    assert stats["adds"] > 0
+    assert stats["scale_outs"] > 0
+
+    kinds = {e["kind"] for e in body["events"]}
+    assert "scale_in" in kinds
+    assert "scale_out" in kinds
+    assert "entry" in kinds
+
+
+def test_replay_positions_carry_the_tranche_count(server):
+    """The whole point of the view: you can see the scaling bot adding."""
+    _, body = server.post("/api/replay", payload(bars=400))
     saw_position = False
-    deadline = time.time() + 60
-    while time.time() < deadline:
-        _, job = server.get(f"/api/jobs/{started['job_id']}")
-        positions = (job["result"] or {}).get("positions") or []
-        if positions:
-            position = positions[0]
+    saw_multiple_tranches = False
+
+    for frame in body["frames"]:
+        for position in frame["positions"]:
+            saw_position = True
             for key in ("symbol", "side", "qty", "avg_price", "stop_loss",
                         "adds", "tranches", "unrealized"):
                 assert key in position, key
-            assert position["tranches"] >= 1
-            saw_position = True
-            break
-        time.sleep(0.02)
+            if position["tranches"] > 1:
+                saw_multiple_tranches = True
 
-    wait_for(started["job_id"], server)
-    assert saw_position, "expected at least one open position during the replay"
+    assert saw_position
+    assert saw_multiple_tranches, "expected the scaling bot to add at least once"
 
 
-def test_paper_can_be_stopped_early(server):
-    _, started = server.post("/api/paper", backtest_payload(bars=5000, delay_ms=5))
-
-    # wait for the replay to get going, then stop it
-    deadline = time.time() + 60
-    while time.time() < deadline:
-        _, job = server.get(f"/api/jobs/{started['job_id']}")
-        if (job["result"] or {}).get("bar", 0) > 20:
-            break
-        time.sleep(0.02)
-
-    status, payload = server.post(f"/api/jobs/{started['job_id']}/stop", {})
-    assert status == 200
-    assert payload["stopped"] == started["job_id"]
-
-    job = wait_for(started["job_id"], server, statuses=("stopped",), timeout=20)
-    assert job["result"]["bar"] < 5000
-    assert job["result"]["bars"] == 5000
+def test_replay_is_deterministic(server):
+    _, first = server.post("/api/replay", payload(bars=200))
+    _, second = server.post("/api/replay", payload(bars=200))
+    assert first["frames"] == second["frames"]
+    assert first["trades"] == second["trades"]
 
 
-def test_paper_matches_a_plain_backtest_on_the_same_seed(server):
-    """The live replay is the same engine - it must agree with a backtest."""
-    _, paper_id = server.post(
-        "/api/paper", backtest_payload(bars=300, delay_ms=0, scaling={"mode": "off"})
-    )
-    paper = wait_for(paper_id["job_id"], server)["result"]
+def test_replay_events_are_json_safe(server):
+    """Events must survive a json.dumps round trip with no custom encoder."""
+    _, body = server.post("/api/replay", payload(bars=300))
+    assert body["events"]
+    assert json.loads(json.dumps(body)) == body
 
-    _, back_id = server.post("/api/run", backtest_payload(bars=300, scaling={"mode": "off"}))
-    back = wait_for(back_id["job_id"], server)["result"]
 
-    assert paper["equity"] == pytest.approx(back["stats"]["final_equity"], rel=1e-9)
-    assert len(paper["trades"]) == back["stats"]["trades"]
+def test_replay_clamps_warmup_so_something_happens(monkeypatch):
+    """The live view shortens warmup so the first watched bars already show activity.
+
+    A stub strategy whose warmup is longer than the whole replay would never
+    signal at all if the clamp were missing - so any position proves it.
+    """
+    import bot.strategies as strategies
+
+    real_build = strategies.build
+
+    def stub(name, **params):
+        strategy = real_build(name, **params)
+        strategy.warmup = 10_000          # far longer than the replay below
+        return strategy
+
+    monkeypatch.setattr(strategies, "build", stub)
+    result = run_replay(payload(bars=200, scaling=SCALING_OFF))
+
+    assert any(frame["positions"] for frame in result["frames"]) or result["trades"]
+    # the shared strategy class must not be left mutated for anyone else
+    assert real_build("ma_crossover").warmup == 60
+
+
+def test_replay_with_an_unknown_strategy_is_a_json_error(server):
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        server.post("/api/replay", payload(strategy="does_not_exist"))
+    assert excinfo.value.code == 400
 
 
 # --------------------------------------------------------------------------- #
@@ -480,51 +434,32 @@ def test_paper_matches_a_plain_backtest_on_the_same_seed(server):
 # --------------------------------------------------------------------------- #
 
 
-def test_run_backtest_job_populates_the_job():
-    job = Job(id="direct", kind="backtest")
-    run_backtest_job(job, backtest_payload(bars=150))
-
-    assert job.status == "done"
-    assert job.progress == 1.0
-    assert job.result["stats"]["trades"] >= 0
+def test_run_backtest_returns_a_payload():
+    result = run_backtest(payload(bars=150))
+    assert result["stats"]["trades"] >= 0
+    assert len(result["equity_curve"]) == 150
 
 
-def test_run_paper_job_respects_stop_requested():
-    job = Job(id="direct-paper", kind="paper")
-    payload = backtest_payload(bars=500, delay_ms=0, scaling={"mode": "off"})
-
-    # stop after ~30 bars by hooking the snapshot
-    original = web.live_snapshot
-    calls = {"n": 0}
-
-    def counting(engine, broker, scaling, index, total):
-        calls["n"] += 1
-        if calls["n"] > 30:
-            job.stop_requested = True
-        return original(engine, broker, scaling, index, total)
-
-    web.live_snapshot = counting
-    try:
-        run_paper_job(job, payload)
-    finally:
-        web.live_snapshot = original
-
-    assert job.status == "stopped"
-    assert job.result["bar"] < 500
+def test_run_replay_returns_frames_and_lists():
+    result = run_replay(payload(bars=150))
+    assert len(result["frames"]) == 150
+    assert isinstance(result["trades"], list)
+    assert isinstance(result["events"], list)
+    assert result["meta"]["bars"] == 150
 
 
-def test_run_paper_job_does_not_leak_warmup_into_a_backtest():
-    """The live view shortens warmup so something happens quickly; the shared
-    strategy classes must not be left in that state for other runs."""
-    job = Job(id="warmup", kind="paper")
-    run_paper_job(job, backtest_payload(bars=120, delay_ms=0))
-
-    from bot.strategies import build
-
-    fresh = build("ma_crossover")
-    assert fresh.warmup == 60
-    run_backtest_job(Job(id="bt", kind="backtest"), backtest_payload(bars=120))
-    assert build("ma_crossover").warmup == 60
+def test_frame_shape_from_a_real_run():
+    result = run_replay(payload(bars=60))
+    first = result["frames"][0]
+    assert first["bar"] == 0
+    assert first["bars"] == 60
+    assert first["trades_closed"] == 0
+    assert first["events_seen"] == 0
+    # the last frame has seen everything the run produced
+    last = result["frames"][-1]
+    assert last["bar"] == 59
+    assert last["trades_closed"] == len(result["trades"])
+    assert last["events_seen"] == len(result["events"])
 
 
 # --------------------------------------------------------------------------- #
@@ -539,6 +474,21 @@ def test_serve_binds_to_every_interface():
         assert httpd.server_address[1] > 0
     finally:
         httpd.server_close()
+
+
+def test_serve_is_threaded():
+    """Concurrent requests must not serialise behind one long replay."""
+    httpd = web.serve("127.0.0.1", 0)
+    try:
+        assert isinstance(httpd, __import__("http.server", fromlist=["ThreadingHTTPServer"])
+                          .ThreadingHTTPServer)
+    finally:
+        httpd.server_close()
+
+
+def test_strategies_payload_direct():
+    body = strategies_payload()
+    assert set(body["strategies"]) == {"ma_crossover", "rsi_reversion", "breakout"}
 
 
 def test_main_starts_and_stops(monkeypatch):

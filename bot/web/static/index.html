@@ -131,11 +131,11 @@
 
     <div class="actions">
       <button id="run-btn" class="btn btn-primary">Run backtest</button>
-      <button id="paper-btn" class="btn btn-secondary">Watch live paper</button>
-      <button id="stop-btn" class="btn btn-ghost" disabled>Stop</button>
+      <button id="replay-btn" class="btn btn-secondary">Watch the scaling bot</button>
     </div>
-    <div id="progress" class="progress"><div></div></div>
-    <p class="hint">Simulated EUR/USD data — mechanics are real, returns are not.</p>
+    <p class="hint">Simulated EUR/USD data — the mechanics are real, the returns
+    are not a forecast. <b>Watch the scaling bot</b> replays a session bar by
+    bar: pause, scrub, or change speed at any point.</p>
   </aside>
 
   <!-- ---------------------------------------------------------------- results -->
@@ -145,6 +145,17 @@
       <div class="panel-head">
         <h2>Equity curve</h2>
         <div id="chart-legend" class="legend"></div>
+      </div>
+      <div class="transport">
+        <button id="play-btn" class="btn btn-ghost btn-sm" disabled>Play</button>
+        <input id="scrub" class="scrub" type="range" min="0" max="0" value="0" step="1" disabled>
+        <span id="bar-readout" class="bar-readout">bar —</span>
+        <select id="speed" class="speed" disabled>
+          <option value="1">1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+          <option value="8">8×</option>
+        </select>
       </div>
       <div id="chart" class="chart"></div>
       <div id="empty-state" class="empty">
