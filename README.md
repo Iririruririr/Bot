@@ -40,6 +40,7 @@ python -m bot grid                     # run the grid/ladder bot
 python -m bot gen-data                 # write a synthetic historical CSV
 python -m bot report                   # report from the local database
 python -m bot strategies               # list strategies
+python -m bot web --port 8000          # serve the web dashboard
 ```
 
 Every command takes `--help`. Common flags:
@@ -98,6 +99,49 @@ python -m bot grid --centre 1.08 --levels 5 --spacing 25 --qty 10000 \
 Grid bots harvest small profits in a range and bleed in a trend, so always pair
 them with `--hard-stop` or `--max-qty`.
 
+## Web dashboard
+
+A single-page dashboard, served by a stdlib `http.server` — the repo stays
+dependency-free.
+
+```bash
+python -m bot web --port 8000
+# then open http://localhost:8000
+```
+
+It binds to `0.0.0.0` by default, so it also works from a phone on the same
+network, and the layout reflows down to a single column.
+
+From the sidebar you can:
+
+* **Run a backtest** on any strategy/scaling/risk configuration and get the
+  equity curve, the full statistics block, the trade list and the scaling-bot
+  activity feed.
+* **Watch a live paper session** — the same engine replays a simulated feed
+  bar-by-bar, so the scaling bot's adds, breakeven moves, trailing stops and
+  scale-out tranches appear as they happen. Positions, tranche count, open P&L
+  and the live equity curve update every bar, and you can stop the session at
+  any point.
+
+Everything is synthetic EUR/USD data, so the mechanics are real but the returns
+are not a forecast.
+
+The JSON API behind it:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/health` | liveness + version |
+| `GET` | `/api/strategies` | registered strategies and their defaults |
+| `GET` | `/api/config` | current default configuration |
+| `POST` | `/api/run` | start a backtest → `{job_id}` |
+| `POST` | `/api/paper` | start a live replay → `{job_id}` |
+| `GET` | `/api/jobs` | every job |
+| `GET` | `/api/jobs/{id}` | job state, progress and latest result |
+| `POST` | `/api/jobs/{id}/stop` | request an early stop |
+
+Jobs run on their own threads, so a long replay never blocks the UI; the page
+polls its job and re-renders as the result grows.
+
 ## Live trading (OANDA)
 
 The paper and live paths share the same engine. OANDA is supported because it
@@ -139,6 +183,7 @@ bot/
 ├── strategies/ MA crossover, RSI reversion, breakout + indicators
 ├── scaling/    the scaling bot (scale-in/out) and the grid ladder
 ├── backtest/   backtest runner + performance statistics
+├── web/        stdlib dashboard server + static assets
 ├── report.py   terminal tables and equity sparklines
 ├── config.py   JSON/env configuration
 └── cli.py      command line interface

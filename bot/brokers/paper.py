@@ -329,6 +329,10 @@ class PaperBroker(Broker):
     def cash(self) -> float:
         return self._cash
 
+    def mid(self, symbol: str) -> Optional[float]:
+        """Last mid price seen for ``symbol``, or None before the first quote."""
+        return self._last_mid.get(symbol)
+
     def closed_trades(self) -> List[Trade]:
         return list(self._trades)
 

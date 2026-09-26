@@ -422,6 +422,13 @@ def cmd_strategies(args) -> int:
     return 0
 
 
+def cmd_web(args) -> int:
+    """Serve the dashboard (blocking; Ctrl+C to stop)."""
+    from bot.web.server import main as web_main
+
+    return web_main(["--host", args.host, "--port", str(args.port)])
+
+
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
@@ -576,6 +583,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     strategies = sub.add_parser("strategies", help="list strategies")
     strategies.set_defaults(func=cmd_strategies)
+
+    web = sub.add_parser("web", help="serve the web dashboard")
+    web.add_argument("--host", default="0.0.0.0",
+                     help="interface to bind (0.0.0.0 = every interface)")
+    web.add_argument("--port", type=int, default=8000)
+    web.set_defaults(func=cmd_web)
 
     return parser
 

@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0e14">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="Dashboard for the FX trading bot and scaling bot: backtest any configuration, or watch a paper session replay in real time.">
+<title>FX Bot · Trading &amp; Scaling Dashboard</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="dot"></span>
+    <h1>FX Bot</h1>
+    <span class="sub">trading bot &nbsp;+&nbsp; scaling bot</span>
+  </div>
+  <div class="topbar-status">
+    <span id="conn" class="pill pill-idle">idle</span>
+    <span id="equity-pill" class="pill">equity <b id="equity-value">—</b></span>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- ---------------------------------------------------------------- config -->
+  <aside class="panel config">
+    <h2>Configuration</h2>
+
+    <label class="field">
+      <span>Strategy</span>
+      <select id="strategy"></select>
+    </label>
+
+    <div class="grid2">
+      <label class="field">
+        <span>Bars</span>
+        <input id="bars" type="number" value="2500" min="100" step="100">
+      </label>
+      <label class="field">
+        <span>Seed</span>
+        <input id="seed" type="number" value="7" step="1">
+      </label>
+    </div>
+
+    <label class="field">
+      <span>Volatility <em id="vol-label">12</em> pips / bar</span>
+      <input id="vol_pips" type="range" min="2" max="40" value="12" step="1">
+    </label>
+
+    <fieldset>
+      <legend>Scaling bot</legend>
+      <label class="field">
+        <span>Mode</span>
+        <select id="scale_mode">
+          <option value="off">off — plain trading bot</option>
+          <option value="pyramid" selected>pyramid — add into strength</option>
+          <option value="dca">dca — average into weakness</option>
+        </select>
+      </label>
+      <div class="grid2">
+        <label class="field">
+          <span>Tranches</span>
+          <input id="tranches" type="number" value="3" min="1" max="8">
+        </label>
+        <label class="field">
+          <span>Step (R)</span>
+          <input id="add_step_r" type="number" value="1.0" min="0.1" step="0.1">
+        </label>
+      </div>
+      <div class="grid2">
+        <label class="field">
+          <span>Scale-out R</span>
+          <input id="scale_out_r" type="text" value="1 2 3">
+        </label>
+        <label class="field">
+          <span>Fractions</span>
+          <input id="scale_out_frac" type="text" value="0.5 0.25 0.25">
+        </label>
+      </div>
+      <div class="grid2">
+        <label class="field">
+          <span>Breakeven at R</span>
+          <input id="breakeven_at_r" type="number" value="1.0" min="0" step="0.1">
+        </label>
+        <label class="field">
+          <span>Trail (ATR)</span>
+          <input id="trail_atr" type="number" value="3.0" min="0" step="0.5">
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Risk</legend>
+      <div class="grid2">
+        <label class="field">
+          <span>Risk / trade %</span>
+          <input id="risk_pct" type="number" value="1.0" min="0.1" step="0.1">
+        </label>
+        <label class="field">
+          <span>Daily loss %</span>
+          <input id="max_daily_loss" type="number" value="3.0" min="0.5" step="0.5">
+        </label>
+      </div>
+      <div class="grid2">
+        <label class="field">
+          <span>Max drawdown %</span>
+          <input id="max_drawdown" type="number" value="15.0" min="1" step="1">
+        </label>
+        <label class="field">
+          <span>Exposure cap %</span>
+          <input id="max_exposure" type="number" value="100" min="10" step="10">
+        </label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Market</legend>
+      <div class="grid2">
+        <label class="field">
+          <span>Spread (pips)</span>
+          <input id="spread_pips" type="number" value="1.0" min="0" step="0.5">
+        </label>
+        <label class="field">
+          <span>Slippage (pips)</span>
+          <input id="slippage_pips" type="number" value="0.2" min="0" step="0.1">
+        </label>
+      </div>
+    </fieldset>
+
+    <div class="actions">
+      <button id="run-btn" class="btn btn-primary">Run backtest</button>
+      <button id="paper-btn" class="btn btn-secondary">Watch live paper</button>
+      <button id="stop-btn" class="btn btn-ghost" disabled>Stop</button>
+    </div>
+    <div id="progress" class="progress"><div></div></div>
+    <p class="hint">Simulated EUR/USD data — mechanics are real, returns are not.</p>
+  </aside>
+
+  <!-- ---------------------------------------------------------------- results -->
+  <section class="results">
+
+    <div class="panel chart-panel">
+      <div class="panel-head">
+        <h2>Equity curve</h2>
+        <div id="chart-legend" class="legend"></div>
+      </div>
+      <div id="chart" class="chart"></div>
+      <div id="empty-state" class="empty">
+        <p>No run yet.</p>
+        <p class="muted">Hit <b>Run backtest</b> or <b>Watch live paper</b>.</p>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>Performance</h2></div>
+      <div id="stats" class="stats"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>Scaling bot</h2></div>
+      <div id="scaling" class="scaling"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Trades</h2>
+        <span id="trade-count" class="muted"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="trades" id="trades-table">
+          <thead>
+            <tr>
+              <th>Exit time</th><th>Side</th><th>Qty</th>
+              <th>Entry</th><th>Exit</th><th>P&amp;L</th><th>MaxR</th><th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="trades-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>Scaling activity</h2></div>
+      <div class="table-wrap">
+        <table class="events" id="events-table">
+          <thead><tr><th>Event</th><th>Detail</th></tr></thead>
+          <tbody id="events-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>
