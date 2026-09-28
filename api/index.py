@@ -10,6 +10,16 @@ dashboard handler in :mod:`bot.web.server`.  All the routing, the JSON API and
 the static-asset serving live there, which means the local
 ``python -m bot web`` server and the deployed serverless function run the
 exact same code.
+
+Verified against Vercel's own detector (``findAppOrHandler`` from
+``@vercel/python-analysis``, as called by ``@vercel/python``):
+
+    this file (class handler)            -> "handler"   # detected
+    the same file refactored to
+      ``handler = DashboardHandler``     -> null        # build fails
+
+That second line is why the class is written out longhand instead of aliased,
+and why ``tests/test_vercel_entrypoint.py`` asserts on the AST shape.
 """
 from __future__ import annotations
 

@@ -12,3 +12,7 @@ htmlcov/
 *.egg-info/
 build/
 dist/
+
+# npm (the Vercel CLI, if you install it locally)
+node_modules/
+package-lock.json
