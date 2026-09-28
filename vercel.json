@@ -1,6 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "pip install -r requirements.txt",
+  "buildCommand": "pip install -r requirements-runtime.txt",
   "outputDirectory": "bot/web/static",
   "functions": {
     "api/index.py": {

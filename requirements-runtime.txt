@@ -1,0 +1,10 @@
+# The bot is stdlib-only: it needs nothing at runtime.
+#
+# requirements.txt (pytest / numpy / pandas) is for development and analysis
+# only, and is deliberately NOT installed into the deployed function - it would
+# add roughly 100 MB and several minutes of build time for code that never
+# runs.  vercel.json points its buildCommand here instead.
+#
+# Keep this file present and effectively empty.  If the bot ever gains a real
+# runtime dependency, add it here (and it will need a matching test in
+# tests/test_vercel_entrypoint.py).

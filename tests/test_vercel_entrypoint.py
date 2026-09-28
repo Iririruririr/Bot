@@ -313,3 +313,37 @@ def test_python_version_pinned():
 def test_requirements_exist_for_the_build():
     """Vercel installs requirements.txt before building the function."""
     assert (REPO_ROOT / "requirements.txt").is_file()
+
+
+def test_the_deployed_function_installs_no_dev_extras():
+    """numpy/pandas/pytest must not be bundled into the function.
+
+    vercel.json used to build with `pip install -r requirements.txt`, which
+    pulled ~100 MB of numpy and pandas into a function that never imports
+    either.  It now points at requirements-runtime.txt, which is empty.
+    """
+    config = json.loads((REPO_ROOT / "vercel.json").read_text())
+    assert config["buildCommand"].endswith("requirements-runtime.txt"), (
+        "the build must install the runtime requirements, not the dev extras"
+    )
+
+    runtime = (REPO_ROOT / "requirements-runtime.txt").read_text()
+    declared = [
+        line.strip() for line in runtime.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert not declared, (
+        f"the bot is stdlib-only; requirements-runtime.txt should stay empty, "
+        f"found: {declared}"
+    )
+
+    # and nothing in the deployed path actually imports them
+    for banned in ("numpy", "pandas"):
+        for path in sorted((REPO_ROOT / "bot").rglob("*.py")):
+            for line in path.read_text().splitlines():
+                stripped = line.strip()
+                if stripped.startswith(("import ", "from ")) and banned in stripped:
+                    raise AssertionError(
+                        f"{path.relative_to(REPO_ROOT)} imports {banned} at "
+                        "module level, so it must be in requirements-runtime.txt"
+                    )
