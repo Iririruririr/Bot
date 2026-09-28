@@ -1,0 +1,4 @@
+# The bot itself is stdlib-only. These are development / analysis extras:
+pytest>=8.0
+numpy>=1.26
+pandas>=2.1

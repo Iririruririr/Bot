@@ -1,0 +1,37 @@
+{
+  "broker": {
+    "starting_cash": 100000.0,
+    "account_ccy": "USD",
+    "spread_pips": 1.0,
+    "slippage_pips": 0.2,
+    "commission_per_million": 0.0,
+    "lot_size": 1000.0
+  },
+  "risk": {
+    "risk_per_trade_pct": 1.0,
+    "max_daily_loss_pct": 3.0,
+    "max_drawdown_pct": 15.0,
+    "max_open_exposure_pct": 100.0,
+    "max_positions": 4,
+    "max_leverage": 10.0,
+    "lot_size": 1000.0,
+    "account_ccy": "USD"
+  },
+  "scaling": {
+    "tranches": 3,
+    "add_step_r": 1.0,
+    "add_size_mult": 1.0,
+    "mode": "pyramid",
+    "scale_out": [[1.0, 0.5], [2.0, 0.25], [3.0, 0.25]],
+    "breakeven_at_r": 1.0,
+    "trail_atr_mult": null,
+    "trail_start_r": 1.0,
+    "time_stop_bars": null
+  },
+  "engine": {
+    "exit_on_flip": true,
+    "max_history_bars": 800,
+    "cooldown_bars": 0,
+    "record_equity": true
+  }
+}
