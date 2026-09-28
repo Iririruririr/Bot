@@ -25,6 +25,24 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
+from bot import __version__
+from bot.backtest.runner import run_backtest as _run_backtest
+from bot.backtest.stats import Stats
+from bot.brokers.paper import BrokerConfig, PaperBroker
+from bot.config import BotConfig
+from bot.core.engine import Engine, EngineConfig
+from bot.core.risk import RiskConfig, RiskManager
+from bot.data.feed import SimConfig, SimulatedFeed
+from bot.scaling.engine import ScalingConfig, ScalingEngine
+from bot.strategies import available, build
+
+# NOTE: these are deliberately at module level rather than inside the functions
+# that use them.  Vercel's Python builder computes the deployed bundle from the
+# *module-level* import closure and treats function-body imports as lazy, so
+# keeping them local would ship a function that imports fine at build time and
+# then dies with ModuleNotFoundError on the first request.  `bot.cli` imports
+# this module lazily, so the other CLI commands still start fast.
+
 STATIC_DIR = Path(__file__).parent / "static"
 
 # The dashboard sends one payload per watched bar, so a long replay is a biggish
@@ -58,13 +76,6 @@ def _json_safe(event: Dict[str, Any]) -> Dict[str, Any]:
 
 def _build_stack(payload: Dict[str, Any]):
     """Assemble broker/risk/scaling/strategy/engine/feed from a request."""
-    from bot.brokers.paper import BrokerConfig, PaperBroker
-    from bot.core.engine import Engine, EngineConfig
-    from bot.core.risk import RiskConfig, RiskManager
-    from bot.data.feed import SimConfig, SimulatedFeed
-    from bot.scaling.engine import ScalingConfig, ScalingEngine
-    from bot.strategies import build
-
     bars = int(payload.get("bars", 2000))
     bars = max(1, min(bars, MAX_REPLAY_BARS))
     seed = int(payload.get("seed", 7))
@@ -94,10 +105,8 @@ def _build_stack(payload: Dict[str, Any]):
 
 def run_backtest(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Run one backtest and return the whole report in a single response."""
-    from bot.backtest.runner import run_backtest as _run
-
     broker, risk, scaling, strategy, engine, feed, bars = _build_stack(payload)
-    result = _run(feed=feed, strategy=strategy,
+    result = _run_backtest(feed=feed, strategy=strategy,
                   scaling=scaling.config, risk=risk.config,
                   broker=broker.config)
     return result_payload(result)
@@ -191,8 +200,6 @@ def _trade_payload(t) -> Dict[str, Any]:
 
 def result_payload(result) -> Dict[str, Any]:
     """Turn a BacktestResult into JSON the dashboard can render."""
-    from bot.backtest.stats import Stats
-
     stats: Stats = result.stats
     return {
         "meta": result.meta,
@@ -230,8 +237,6 @@ def result_payload(result) -> Dict[str, Any]:
 
 
 def strategies_payload() -> Dict[str, Any]:
-    from bot.strategies import available, build
-
     strategies = {}
     for name in available():
         strategy = build(name)
@@ -244,8 +249,6 @@ def strategies_payload() -> Dict[str, Any]:
 
 
 def default_config_payload() -> Dict[str, Any]:
-    from bot.config import BotConfig
-
     config = BotConfig()
     return {
         "broker": asdict(config.broker),
@@ -344,8 +347,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 
 def _version() -> str:
-    from bot import __version__
-
     return __version__
 
 

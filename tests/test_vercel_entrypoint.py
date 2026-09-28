@@ -146,6 +146,121 @@ def test_entrypoint_is_the_same_code_as_the_local_server():
 
 
 # --------------------------------------------------------------------------- #
+# the import-closure rule
+# --------------------------------------------------------------------------- #
+
+
+def _module_level_imports(path: Path):
+    """Module-level imports only, mirroring Vercel's tracer.
+
+    Vercel's Python builder computes the deployed bundle from the *module-level*
+    import closure and treats function-body imports as lazy, so a module that
+    only imports things inside its functions ships an empty bundle.
+    """
+    tree = ast.parse(path.read_text())
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # do not descend into function bodies
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.Import, ast.ImportFrom)):
+                    continue
+            continue
+        if isinstance(node, ast.Import):
+            found += [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            if node.module:
+                found.append(node.module)
+                # `from pkg import mod` may name a submodule - Vercel probes
+                # these, and bot/strategies/__init__.py relies on it to
+                # register every strategy as an import side effect.
+                found += [f"{node.module}.{a.name}" for a in node.names]
+    return found
+
+
+def test_server_has_no_function_body_imports_of_bot_modules():
+    """The regression that would break the Vercel deploy.
+
+    ``bot/web/server.py`` used to import the backtest stack inside its
+    functions.  Vercel's tracer classified those as lazy and shipped a function
+    with only 4 of the app's 26 files, which builds fine and then dies with
+    ModuleNotFoundError on the first request.
+    """
+    source = (REPO_ROOT / "bot" / "web" / "server.py").read_text()
+    tree = ast.parse(source)
+
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for child in ast.walk(node):
+            if isinstance(child, ast.ImportFrom) and child.module and child.module.startswith("bot"):
+                offenders.append(f"{node.name}(): from {child.module} import ...")
+            elif isinstance(child, ast.Import):
+                offenders += [f"{node.name}(): import {a.name}" for a in child.names
+                              if a.name.startswith("bot")]
+
+    assert not offenders, (
+        "function-body imports of bot modules are excluded from Vercel's "
+        "deployed bundle; move them to module level:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_import_closure_covers_the_whole_dashboard():
+    """Following module-level imports from the entrypoint must reach every
+    module the dashboard actually uses."""
+    seen, frontier = set(), [REPO_ROOT / "api" / "index.py"]
+    while frontier:
+        current = frontier.pop()
+        if current in seen or not current.exists():
+            continue
+        seen.add(current)
+        for name in _module_level_imports(current):
+            parts = name.split(".")
+            for base in (REPO_ROOT, REPO_ROOT / "bot"):
+                candidate = base.joinpath(*parts)
+                for option in (candidate.with_suffix(".py"), candidate / "__init__.py"):
+                    if option.exists():
+                        frontier.append(option)
+                        break
+
+    reachable = {p.relative_to(REPO_ROOT).as_posix() for p in seen}
+    for required in (
+        "bot/web/server.py",
+        "bot/backtest/runner.py",
+        "bot/backtest/stats.py",
+        "bot/brokers/paper.py",
+        "bot/core/engine.py",
+        "bot/core/risk.py",
+        "bot/core/models.py",
+        "bot/data/feed.py",
+        "bot/scaling/engine.py",
+        "bot/strategies/base.py",
+        "bot/strategies/ma_crossover.py",
+        "bot/config.py",
+    ):
+        assert required in reachable, (
+            f"{required} is not reachable via module-level imports from "
+            "api/index.py, so Vercel would not ship it"
+        )
+
+
+def test_other_cli_commands_still_start_fast():
+    """Hoisting the imports must not slow down `python -m bot strategies`.
+
+    The CLI imports bot.web.server lazily inside cmd_web for exactly this
+    reason, so this asserts that is still true.
+    """
+    source = (REPO_ROOT / "bot" / "cli.py").read_text()
+    tree = ast.parse(source)
+    top_level = [
+        n for n in tree.body
+        if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("bot.web")
+    ]
+    assert not top_level, "bot.cli must not import bot.web.server at module level"
+
+
+# --------------------------------------------------------------------------- #
 # vercel.json
 # --------------------------------------------------------------------------- #
 
